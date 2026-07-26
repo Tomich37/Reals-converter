@@ -10,7 +10,7 @@ import pytest
 import app.services.instagram as instagram_service
 from app.config import Settings
 from app.errors import FileTooLarge, UnsupportedMedia
-from app.models import MediaKind, RemoteMedia
+from app.models import InstagramUrl, MediaKind, RemoteMedia
 from app.services.instagram import InstaloaderWorker
 
 
@@ -27,9 +27,10 @@ class FakeResponse:
         content_length: int | None = None,
         location: str | None = None,
         chunks: tuple[bytes, ...] = (b"image",),
+        url: str = "https://cdninstagram.com/media",
     ) -> None:
         self.status_code = status_code
-        self.url = "https://cdninstagram.com/media"
+        self.url = url
         self.headers = {"Content-Type": content_type}
         if content_length is not None:
             self.headers["Content-Length"] = str(content_length)
@@ -58,6 +59,16 @@ class FakeSession:
         del args, kwargs
         self.calls += 1
         return self.response
+
+
+class SequencedSession:
+    def __init__(self, *responses: FakeResponse) -> None:
+        self.responses = list(responses)
+        self.requests: list[tuple[str, dict[str, object]]] = []
+
+    def get(self, url: str, **kwargs) -> FakeResponse:
+        self.requests.append((url, kwargs))
+        return self.responses.pop(0)
 
 
 def download_photo(
@@ -96,6 +107,81 @@ def test_private_dns_address_is_rejected(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_similar_but_foreign_domain_is_rejected() -> None:
     with pytest.raises(UnsupportedMedia):
         instagram_service._validate_remote_url("https://cdninstagram.com.evil.example/media")
+
+
+def test_similar_kkinstagram_domain_is_rejected() -> None:
+    with pytest.raises(UnsupportedMedia):
+        instagram_service._validate_kkinstagram_url(
+            "https://www.kkinstagram.com.evil.example/reel/Code12345/"
+        )
+
+
+def test_kkinstagram_resolver_follows_only_checked_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(instagram_service, "_ensure_public_address", lambda host: None)
+    session = SequencedSession(
+        FakeResponse(
+            status_code=302,
+            location="https://cdninstagram.com/video.mp4",
+            url="https://www.kkinstagram.com/reel/Code12345/",
+        ),
+        FakeResponse(
+            content_type="video/mp4",
+            url="https://cdninstagram.com/video.mp4",
+        ),
+    )
+    worker = InstaloaderWorker(settings())
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    source = worker._resolve_kkinstagram_source(
+        session,
+        instagram_url,
+        threading.Event(),
+    )
+
+    assert source == RemoteMedia(
+        url="https://cdninstagram.com/video.mp4",
+        kind=MediaKind.VIDEO,
+    )
+    assert [request[0] for request in session.requests] == [
+        "https://www.kkinstagram.com/reel/Code12345/",
+        "https://cdninstagram.com/video.mp4",
+    ]
+    assert session.requests[0][1]["allow_redirects"] is False
+    assert session.requests[0][1]["headers"] == {"User-Agent": "TelegramBot (like TwitterBot)"}
+
+
+def test_kkinstagram_resolver_rejects_foreign_redirect_before_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(instagram_service, "_ensure_public_address", lambda host: None)
+    session = SequencedSession(
+        FakeResponse(
+            status_code=302,
+            location="https://evil.example/video.mp4",
+            url="https://www.kkinstagram.com/reel/Code12345/",
+        )
+    )
+    worker = InstaloaderWorker(settings())
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    with pytest.raises(UnsupportedMedia):
+        worker._resolve_kkinstagram_source(
+            session,
+            instagram_url,
+            threading.Event(),
+        )
+
+    assert len(session.requests) == 1
 
 
 def test_declared_file_size_is_checked_before_download(

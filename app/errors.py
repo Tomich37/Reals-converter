@@ -17,6 +17,10 @@ class ContentUnavailable(AppError):
     """Instagram не отдал публикацию без авторизации."""
 
 
+class InstagramAccessBlocked(AppError):
+    """Instagram временно отклонил анонимный запрос, а резервный источник не помог."""
+
+
 class DownloadFailed(AppError):
     """Медиа не удалось загрузить из-за временной ошибки."""
 

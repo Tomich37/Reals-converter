@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import mimetypes
 import multiprocessing
 import socket
@@ -17,8 +18,20 @@ from urllib.parse import urljoin, urlsplit
 
 import instaloader
 import requests
-from instaloader.exceptions import InstaloaderException
+from instaloader.exceptions import (
+    BadResponseException,
+    ConnectionException,
+    InstaloaderException,
+    LoginRequiredException,
+    PrivateProfileNotFollowedException,
+    ProfileNotExistsException,
+    QueryReturnedBadRequestException,
+    QueryReturnedForbiddenException,
+    QueryReturnedNotFoundException,
+    TooManyRequestsException,
+)
 
+from app import texts
 from app.config import Settings
 from app.errors import (
     AppError,
@@ -26,6 +39,7 @@ from app.errors import (
     DownloadFailed,
     DownloadTimedOut,
     FileTooLarge,
+    InstagramAccessBlocked,
     TooManyItems,
     TotalSizeExceeded,
     UnsupportedMedia,
@@ -38,7 +52,17 @@ from app.models import (
     RemoteMedia,
 )
 
+logger = logging.getLogger(__name__)
+
 _ALLOWED_MEDIA_DOMAINS = ("instagram.com", "cdninstagram.com", "fbcdn.net")
+_ALLOWED_KKINSTAGRAM_HOSTS = {
+    "kkinstagram.com",
+    "www.kkinstagram.com",
+    "kkclip.com",
+    "www.kkclip.com",
+}
+_KKINSTAGRAM_BASE_URL = "https://www.kkinstagram.com"
+_KKINSTAGRAM_USER_AGENT = "TelegramBot (like TwitterBot)"
 _PHOTO_CONTENT_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -47,9 +71,23 @@ _VIDEO_CONTENT_TYPES = {
     "video/mp4": ".mp4",
 }
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
+_MAX_NETWORK_STEPS = 4
 _PROCESS_POLL_INTERVAL = 0.05
 _PROCESS_STOP_GRACE_SECONDS = 0.25
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
+_FALLBACK_CANDIDATE_EXCEPTIONS = (
+    BadResponseException,
+    ConnectionException,
+    LoginRequiredException,
+    QueryReturnedBadRequestException,
+    QueryReturnedForbiddenException,
+    TooManyRequestsException,
+)
+_PERMANENT_UNAVAILABLE_EXCEPTIONS = (
+    PrivateProfileNotFollowedException,
+    ProfileNotExistsException,
+    QueryReturnedNotFoundException,
+)
 
 
 class _WorkerCancelled(Exception):
@@ -166,8 +204,40 @@ def _validate_remote_url(url: str) -> str:
     return url
 
 
+def _validate_kkinstagram_url(url: str) -> str:
+    """Разрешает только фиксированные HTTPS-адреса резервного сервиса."""
+
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").rstrip(".").lower()
+        port = parts.port
+    except ValueError as error:
+        raise UnsupportedMedia from error
+
+    if (
+        parts.scheme.lower() != "https"
+        or host not in _ALLOWED_KKINSTAGRAM_HOSTS
+        or parts.username is not None
+        or parts.password is not None
+        or port not in {None, 443}
+    ):
+        raise UnsupportedMedia
+
+    _ensure_public_address(host)
+    return url
+
+
 def _content_type(response: requests.Response) -> str:
     return response.headers.get("Content-Type", "").split(";", maxsplit=1)[0].strip().lower()
+
+
+def _media_kind_for_response(response: requests.Response) -> MediaKind:
+    content_type = _content_type(response)
+    if content_type in _PHOTO_CONTENT_TYPES:
+        return MediaKind.PHOTO
+    if content_type in _VIDEO_CONTENT_TYPES:
+        return MediaKind.VIDEO
+    raise UnsupportedMedia
 
 
 def _extension_for(kind: MediaKind, response: requests.Response) -> str:
@@ -242,13 +312,143 @@ class InstaloaderWorker:
         except _WorkerCancelled:
             raise
         except InstaloaderException as error:
+            if self._is_temporary_instaloader_error(error):
+                if self._settings.kkinstagram_fallback_enabled:
+                    return self._use_kkinstagram_or_raise(
+                        instagram_url,
+                        directory,
+                        cancel_event,
+                        error_type=InstagramAccessBlocked,
+                    )
+                raise InstagramAccessBlocked from error
             raise ContentUnavailable from error
         except (KeyError, TypeError) as error:
             raise ContentUnavailable from error
         except requests.RequestException as error:
+            if self._settings.kkinstagram_fallback_enabled:
+                return self._use_kkinstagram_or_raise(
+                    instagram_url,
+                    directory,
+                    cancel_event,
+                    error_type=DownloadFailed,
+                )
             raise DownloadFailed from error
         finally:
             loader.close()
+
+    @staticmethod
+    def _is_temporary_instaloader_error(error: InstaloaderException) -> bool:
+        if isinstance(error, _PERMANENT_UNAVAILABLE_EXCEPTIONS):
+            return False
+        return isinstance(error, _FALLBACK_CANDIDATE_EXCEPTIONS)
+
+    def _use_kkinstagram_or_raise(
+        self,
+        instagram_url: InstagramUrl,
+        directory: Path,
+        cancel_event: CancellationSignal,
+        *,
+        error_type: type[AppError],
+    ) -> DownloadedPost:
+        """Запускает резервный путь и сохраняет понятную исходную категорию ошибки."""
+
+        logger.info(
+            "Instagram отклонил прямой запрос; используется резервный источник KKInstagram."
+        )
+        try:
+            return self._download_via_kkinstagram(
+                instagram_url,
+                directory,
+                cancel_event,
+            )
+        except _WorkerCancelled:
+            raise
+        except (FileTooLarge, TotalSizeExceeded):
+            raise
+        except Exception as fallback_error:
+            raise error_type from fallback_error
+
+    def _download_via_kkinstagram(
+        self,
+        instagram_url: InstagramUrl,
+        directory: Path,
+        cancel_event: CancellationSignal,
+    ) -> DownloadedPost:
+        """Получает один прямой CDN-файл через резервный сервис и скачивает его."""
+
+        session = requests.Session()
+        try:
+            source = self._resolve_kkinstagram_source(
+                session,
+                instagram_url,
+                cancel_event,
+            )
+            media, _ = self._download_source(
+                session=session,
+                source=source,
+                directory=directory,
+                index=1,
+                current_total=0,
+                cancel_event=cancel_event,
+            )
+        finally:
+            session.close()
+
+        return DownloadedPost(
+            media=(media,),
+            caption=texts.FALLBACK_CAPTION,
+            source_url=instagram_url.canonical,
+        )
+
+    def _resolve_kkinstagram_source(
+        self,
+        session: requests.Session,
+        instagram_url: InstagramUrl,
+        cancel_event: CancellationSignal,
+    ) -> RemoteMedia:
+        """Следует только по проверенным переходам до прямого CDN-файла."""
+
+        current_url = (
+            f"{_KKINSTAGRAM_BASE_URL}/{instagram_url.publication_type}/{instagram_url.shortcode}/"
+        )
+
+        for _ in range(_MAX_NETWORK_STEPS):
+            if cancel_event.is_set():
+                raise _WorkerCancelled
+
+            host = (urlsplit(current_url).hostname or "").rstrip(".").lower()
+            if host in _ALLOWED_KKINSTAGRAM_HOSTS:
+                _validate_kkinstagram_url(current_url)
+            else:
+                _validate_remote_url(current_url)
+
+            response = session.get(
+                current_url,
+                stream=True,
+                allow_redirects=False,
+                timeout=(min(10, self._request_timeout), self._request_timeout),
+                headers={"User-Agent": _KKINSTAGRAM_USER_AGENT},
+            )
+
+            if response.status_code in _REDIRECT_CODES:
+                location = response.headers.get("Location")
+                response.close()
+                if not location:
+                    raise DownloadFailed
+                current_url = urljoin(current_url, location)
+                continue
+
+            try:
+                response.raise_for_status()
+                _validate_remote_url(response.url)
+                return RemoteMedia(
+                    url=response.url,
+                    kind=_media_kind_for_response(response),
+                )
+            finally:
+                response.close()
+
+        raise DownloadFailed
 
     def _download_sources(
         self,
@@ -286,7 +486,7 @@ class InstaloaderWorker:
     ) -> tuple[DownloadedMedia, int]:
         current_url = source.url
 
-        for _ in range(4):
+        for _ in range(_MAX_NETWORK_STEPS):
             if cancel_event.is_set():
                 raise _WorkerCancelled
 
@@ -367,6 +567,7 @@ _WORKER_ERROR_TYPES: dict[str, type[AppError]] = {
         ContentUnavailable,
         DownloadFailed,
         FileTooLarge,
+        InstagramAccessBlocked,
         TooManyItems,
         TotalSizeExceeded,
         UnsupportedMedia,

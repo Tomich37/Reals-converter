@@ -19,6 +19,7 @@ from app.errors import (
     DownloadFailed,
     DownloadTimedOut,
     FileTooLarge,
+    InstagramAccessBlocked,
     InvalidInstagramUrl,
     RateLimited,
     ServiceBusy,
@@ -34,6 +35,7 @@ from app.services.url_validator import parse_instagram_url
 logger = logging.getLogger(__name__)
 
 _ERROR_TEXTS: tuple[tuple[type[AppError], str], ...] = (
+    (InstagramAccessBlocked, texts.INSTAGRAM_ACCESS_BLOCKED),
     (ContentUnavailable, texts.CONTENT_UNAVAILABLE),
     (DownloadTimedOut, texts.DOWNLOAD_TIMEOUT),
     (TooManyItems, texts.TOO_MANY_ITEMS),

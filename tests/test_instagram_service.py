@@ -7,11 +7,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from instaloader.exceptions import ConnectionException, QueryReturnedNotFoundException
 
+import app.services.instagram as instagram_service
 from app.config import Settings
-from app.errors import DownloadFailed, DownloadTimedOut, TooManyItems
+from app.errors import (
+    ContentUnavailable,
+    DownloadFailed,
+    DownloadTimedOut,
+    InstagramAccessBlocked,
+    TooManyItems,
+)
 from app.models import DownloadedMedia, DownloadedPost, InstagramUrl, MediaKind
-from app.services.instagram import InstagramDownloader, extract_media_sources
+from app.services.instagram import InstagramDownloader, InstaloaderWorker, extract_media_sources
 
 
 def settings(temp_root: Path) -> Settings:
@@ -72,6 +80,98 @@ def test_sidecar_larger_than_album_limit_is_rejected() -> None:
         extract_media_sources(FakePost(nodes), max_items=10)
 
 
+def _raise_instaloader_error(error: Exception):
+    def raise_error(context: object, shortcode: str) -> None:
+        del context, shortcode
+        raise error
+
+    return raise_error
+
+
+def test_temporary_instagram_block_uses_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = InstaloaderWorker(settings(tmp_path))
+    expected = DownloadedPost(
+        media=(),
+        caption="Резервный результат",
+        source_url="https://www.instagram.com/reel/Code12345/",
+    )
+    calls = 0
+
+    def fallback(
+        instagram_url: InstagramUrl,
+        directory: Path,
+        cancel_event: threading.Event,
+    ) -> DownloadedPost:
+        nonlocal calls
+        del instagram_url, directory, cancel_event
+        calls += 1
+        return expected
+
+    monkeypatch.setattr(
+        instagram_service.instaloader.Post,
+        "from_shortcode",
+        _raise_instaloader_error(ConnectionException("403 Forbidden")),
+    )
+    monkeypatch.setattr(worker, "_download_via_kkinstagram", fallback)
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    result = worker.download(instagram_url, tmp_path, threading.Event())
+
+    assert result is expected
+    assert calls == 1
+
+
+def test_disabled_fallback_reports_temporary_instagram_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_settings = replace(
+        settings(tmp_path),
+        kkinstagram_fallback_enabled=False,
+    )
+    worker = InstaloaderWorker(worker_settings)
+    monkeypatch.setattr(
+        instagram_service.instaloader.Post,
+        "from_shortcode",
+        _raise_instaloader_error(ConnectionException("403 Forbidden")),
+    )
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    with pytest.raises(InstagramAccessBlocked):
+        worker.download(instagram_url, tmp_path, threading.Event())
+
+
+def test_not_found_post_does_not_use_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = InstaloaderWorker(settings(tmp_path))
+    monkeypatch.setattr(
+        instagram_service.instaloader.Post,
+        "from_shortcode",
+        _raise_instaloader_error(QueryReturnedNotFoundException("404 Not Found")),
+    )
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/p/Code12345/",
+        shortcode="Code12345",
+        publication_type="p",
+    )
+
+    with pytest.raises(ContentUnavailable):
+        worker.download(instagram_url, tmp_path, threading.Event())
+
+
 class SuccessfulWorker:
     def download(
         self,
@@ -129,6 +229,31 @@ class SlowWorker:
     ) -> DownloadedPost:
         time.sleep(2)
         raise DownloadFailed
+
+
+class BlockedWorker:
+    def download(
+        self,
+        instagram_url: InstagramUrl,
+        directory: Path,
+        cancel_event: threading.Event,
+    ) -> DownloadedPost:
+        del instagram_url, directory, cancel_event
+        raise InstagramAccessBlocked
+
+
+@pytest.mark.asyncio
+async def test_instagram_block_error_crosses_process_boundary(tmp_path: Path) -> None:
+    downloader = InstagramDownloader(settings(tmp_path), worker=BlockedWorker())
+    url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    with pytest.raises(InstagramAccessBlocked):
+        async with downloader.download(url):
+            pytest.fail("Контекст не должен открыться после ошибки загрузчика.")
 
 
 @pytest.mark.asyncio
