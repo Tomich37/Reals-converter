@@ -13,24 +13,12 @@ class InvalidInstagramUrl(AppError):
     """Сообщение не содержит одну поддерживаемую ссылку Instagram."""
 
 
-class ContentUnavailable(AppError):
-    """Instagram не отдал публикацию без авторизации."""
-
-
-class InstagramAccessBlocked(AppError):
-    """Instagram временно отклонил анонимный запрос, а резервный источник не помог."""
-
-
 class DownloadFailed(AppError):
     """Медиа не удалось загрузить из-за временной ошибки."""
 
 
 class DownloadTimedOut(AppError):
     """Загрузка не завершилась за отведённое время."""
-
-
-class TooManyItems(AppError):
-    """В публикации больше медиафайлов, чем можно отправить одним альбомом."""
 
 
 class FileTooLarge(AppError):

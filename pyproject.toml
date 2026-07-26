@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "aiogram==3.30.0",
-    "instaloader==4.15.3",
     "python-dotenv==1.2.2",
+    "requests==2.34.2",
 ]
 
 [project.optional-dependencies]

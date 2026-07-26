@@ -4,43 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import logging
 import mimetypes
 import multiprocessing
 import socket
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol
 from urllib.parse import urljoin, urlsplit
 
-import instaloader
 import requests
-from instaloader.exceptions import (
-    BadResponseException,
-    ConnectionException,
-    InstaloaderException,
-    LoginRequiredException,
-    PrivateProfileNotFollowedException,
-    ProfileNotExistsException,
-    QueryReturnedBadRequestException,
-    QueryReturnedForbiddenException,
-    QueryReturnedNotFoundException,
-    TooManyRequestsException,
-)
 
 from app import texts
 from app.config import Settings
 from app.errors import (
     AppError,
-    ContentUnavailable,
     DownloadFailed,
     DownloadTimedOut,
     FileTooLarge,
-    InstagramAccessBlocked,
-    TooManyItems,
     TotalSizeExceeded,
     UnsupportedMedia,
 )
@@ -51,8 +33,6 @@ from app.models import (
     MediaKind,
     RemoteMedia,
 )
-
-logger = logging.getLogger(__name__)
 
 _ALLOWED_MEDIA_DOMAINS = ("instagram.com", "cdninstagram.com", "fbcdn.net")
 _ALLOWED_KKINSTAGRAM_HOSTS = {
@@ -75,19 +55,6 @@ _MAX_NETWORK_STEPS = 4
 _PROCESS_POLL_INTERVAL = 0.05
 _PROCESS_STOP_GRACE_SECONDS = 0.25
 _PROCESS_TERMINATE_GRACE_SECONDS = 1.0
-_FALLBACK_CANDIDATE_EXCEPTIONS = (
-    BadResponseException,
-    ConnectionException,
-    LoginRequiredException,
-    QueryReturnedBadRequestException,
-    QueryReturnedForbiddenException,
-    TooManyRequestsException,
-)
-_PERMANENT_UNAVAILABLE_EXCEPTIONS = (
-    PrivateProfileNotFollowedException,
-    ProfileNotExistsException,
-    QueryReturnedNotFoundException,
-)
 
 
 class _WorkerCancelled(Exception):
@@ -111,49 +78,6 @@ class SyncInstagramWorker(Protocol):
         cancel_event: CancellationSignal,
     ) -> DownloadedPost:
         """Загружает публикацию в указанный каталог."""
-
-
-def extract_media_sources(post: object, max_items: int) -> tuple[RemoteMedia, ...]:
-    """Преобразует объект Instaloader Post в упорядоченный список медиа."""
-
-    typename = getattr(post, "typename", "")
-    sources: list[RemoteMedia] = []
-
-    if typename == "GraphSidecar":
-        media_count = int(getattr(post, "mediacount", 0) or 0)
-        if media_count > max_items:
-            raise TooManyItems
-
-        nodes = list(islice(post.get_sidecar_nodes(), max_items + 1))
-        if len(nodes) > max_items:
-            raise TooManyItems
-
-        for node in nodes:
-            is_video = bool(node.is_video)
-            media_url = node.video_url if is_video else node.display_url
-            if not media_url:
-                raise UnsupportedMedia
-            sources.append(
-                RemoteMedia(
-                    url=str(media_url),
-                    kind=MediaKind.VIDEO if is_video else MediaKind.PHOTO,
-                )
-            )
-    else:
-        is_video = bool(getattr(post, "is_video", False))
-        media_url = getattr(post, "video_url", None) if is_video else getattr(post, "url", None)
-        if not media_url:
-            raise UnsupportedMedia
-        sources.append(
-            RemoteMedia(
-                url=str(media_url),
-                kind=MediaKind.VIDEO if is_video else MediaKind.PHOTO,
-            )
-        )
-
-    if not sources:
-        raise UnsupportedMedia
-    return tuple(sources)
 
 
 def _is_allowed_domain(host: str) -> bool:
@@ -253,8 +177,8 @@ def _extension_for(kind: MediaKind, response: requests.Response) -> str:
     raise UnsupportedMedia
 
 
-class InstaloaderWorker:
-    """Синхронный адаптер Instaloader с контролем адресов и размеров."""
+class KKInstagramWorker:
+    """Получает прямой медиафайл через KKInstagram и безопасно сохраняет его."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -269,112 +193,10 @@ class InstaloaderWorker:
         directory: Path,
         cancel_event: CancellationSignal,
     ) -> DownloadedPost:
-        loader = instaloader.Instaloader(
-            sleep=True,
-            quiet=True,
-            download_pictures=False,
-            download_videos=False,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            post_metadata_txt_pattern="",
-            max_connection_attempts=1,
-            request_timeout=self._request_timeout,
-        )
+        """Разрешает ссылку через KKInstagram и скачивает первый доступный элемент."""
 
-        try:
-            if cancel_event.is_set():
-                raise _WorkerCancelled
-
-            post = instaloader.Post.from_shortcode(loader.context, instagram_url.shortcode)
-            sources = extract_media_sources(post, self._settings.max_media_items)
-            caption = getattr(post, "caption", None)
-
-            session = loader.context.get_anonymous_session()
-            try:
-                media = self._download_sources(
-                    session=session,
-                    sources=sources,
-                    directory=directory,
-                    cancel_event=cancel_event,
-                )
-            finally:
-                session.close()
-
-            return DownloadedPost(
-                media=media,
-                caption=str(caption) if caption else None,
-                source_url=instagram_url.canonical,
-            )
-        except AppError:
-            raise
-        except _WorkerCancelled:
-            raise
-        except InstaloaderException as error:
-            if self._is_temporary_instaloader_error(error):
-                if self._settings.kkinstagram_fallback_enabled:
-                    return self._use_kkinstagram_or_raise(
-                        instagram_url,
-                        directory,
-                        cancel_event,
-                        error_type=InstagramAccessBlocked,
-                    )
-                raise InstagramAccessBlocked from error
-            raise ContentUnavailable from error
-        except (KeyError, TypeError) as error:
-            raise ContentUnavailable from error
-        except requests.RequestException as error:
-            if self._settings.kkinstagram_fallback_enabled:
-                return self._use_kkinstagram_or_raise(
-                    instagram_url,
-                    directory,
-                    cancel_event,
-                    error_type=DownloadFailed,
-                )
-            raise DownloadFailed from error
-        finally:
-            loader.close()
-
-    @staticmethod
-    def _is_temporary_instaloader_error(error: InstaloaderException) -> bool:
-        if isinstance(error, _PERMANENT_UNAVAILABLE_EXCEPTIONS):
-            return False
-        return isinstance(error, _FALLBACK_CANDIDATE_EXCEPTIONS)
-
-    def _use_kkinstagram_or_raise(
-        self,
-        instagram_url: InstagramUrl,
-        directory: Path,
-        cancel_event: CancellationSignal,
-        *,
-        error_type: type[AppError],
-    ) -> DownloadedPost:
-        """Запускает резервный путь и сохраняет понятную исходную категорию ошибки."""
-
-        logger.info(
-            "Instagram отклонил прямой запрос; используется резервный источник KKInstagram."
-        )
-        try:
-            return self._download_via_kkinstagram(
-                instagram_url,
-                directory,
-                cancel_event,
-            )
-        except _WorkerCancelled:
-            raise
-        except (FileTooLarge, TotalSizeExceeded):
-            raise
-        except Exception as fallback_error:
-            raise error_type from fallback_error
-
-    def _download_via_kkinstagram(
-        self,
-        instagram_url: InstagramUrl,
-        directory: Path,
-        cancel_event: CancellationSignal,
-    ) -> DownloadedPost:
-        """Получает один прямой CDN-файл через резервный сервис и скачивает его."""
+        if cancel_event.is_set():
+            raise _WorkerCancelled
 
         session = requests.Session()
         try:
@@ -391,12 +213,18 @@ class InstaloaderWorker:
                 current_total=0,
                 cancel_event=cancel_event,
             )
+        except AppError:
+            raise
+        except _WorkerCancelled:
+            raise
+        except requests.RequestException as error:
+            raise DownloadFailed from error
         finally:
             session.close()
 
         return DownloadedPost(
             media=(media,),
-            caption=texts.FALLBACK_CAPTION,
+            caption=texts.KKINSTAGRAM_CAPTION,
             source_url=instagram_url.canonical,
         )
 
@@ -449,30 +277,6 @@ class InstaloaderWorker:
                 response.close()
 
         raise DownloadFailed
-
-    def _download_sources(
-        self,
-        *,
-        session: requests.Session,
-        sources: Sequence[RemoteMedia],
-        directory: Path,
-        cancel_event: CancellationSignal,
-    ) -> tuple[DownloadedMedia, ...]:
-        downloaded: list[DownloadedMedia] = []
-        total_size = 0
-
-        for index, source in enumerate(sources, start=1):
-            media, total_size = self._download_source(
-                session=session,
-                source=source,
-                directory=directory,
-                index=index,
-                current_total=total_size,
-                cancel_event=cancel_event,
-            )
-            downloaded.append(media)
-
-        return tuple(downloaded)
 
     def _download_source(
         self,
@@ -564,11 +368,8 @@ class InstaloaderWorker:
 _WORKER_ERROR_TYPES: dict[str, type[AppError]] = {
     error_type.__name__: error_type
     for error_type in (
-        ContentUnavailable,
         DownloadFailed,
         FileTooLarge,
-        InstagramAccessBlocked,
-        TooManyItems,
         TotalSizeExceeded,
         UnsupportedMedia,
     )
@@ -607,7 +408,7 @@ class InstagramDownloader:
         worker: SyncInstagramWorker | None = None,
     ) -> None:
         self._settings = settings
-        self._worker = worker or InstaloaderWorker(settings)
+        self._worker = worker or KKInstagramWorker(settings)
         if settings.temp_root is not None:
             settings.temp_root.mkdir(parents=True, exist_ok=True)
 

@@ -11,7 +11,7 @@ import app.services.instagram as instagram_service
 from app.config import Settings
 from app.errors import FileTooLarge, UnsupportedMedia
 from app.models import InstagramUrl, MediaKind, RemoteMedia
-from app.services.instagram import InstaloaderWorker
+from app.services.instagram import KKInstagramWorker
 
 
 def settings() -> Settings:
@@ -65,10 +65,14 @@ class SequencedSession:
     def __init__(self, *responses: FakeResponse) -> None:
         self.responses = list(responses)
         self.requests: list[tuple[str, dict[str, object]]] = []
+        self.closed = False
 
     def get(self, url: str, **kwargs) -> FakeResponse:
         self.requests.append((url, kwargs))
         return self.responses.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def download_photo(
@@ -79,7 +83,7 @@ def download_photo(
     worker_settings: Settings | None = None,
 ) -> None:
     monkeypatch.setattr(instagram_service, "_ensure_public_address", lambda host: None)
-    worker = InstaloaderWorker(worker_settings or settings())
+    worker = KKInstagramWorker(worker_settings or settings())
     worker._download_source(
         session=FakeSession(response),
         source=RemoteMedia(
@@ -131,7 +135,7 @@ def test_kkinstagram_resolver_follows_only_checked_redirects(
             url="https://cdninstagram.com/video.mp4",
         ),
     )
-    worker = InstaloaderWorker(settings())
+    worker = KKInstagramWorker(settings())
     instagram_url = InstagramUrl(
         canonical="https://www.instagram.com/reel/Code12345/",
         shortcode="Code12345",
@@ -156,6 +160,49 @@ def test_kkinstagram_resolver_follows_only_checked_redirects(
     assert session.requests[0][1]["headers"] == {"User-Agent": "TelegramBot (like TwitterBot)"}
 
 
+def test_worker_downloads_only_through_kkinstagram(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(instagram_service, "_ensure_public_address", lambda host: None)
+    session = SequencedSession(
+        FakeResponse(
+            status_code=302,
+            location="https://cdninstagram.com/video.mp4",
+            url="https://www.kkinstagram.com/reel/Code12345/",
+        ),
+        FakeResponse(
+            content_type="video/mp4",
+            url="https://cdninstagram.com/video.mp4",
+        ),
+        FakeResponse(
+            content_type="video/mp4",
+            chunks=(b"video",),
+            url="https://cdninstagram.com/video.mp4",
+        ),
+    )
+    monkeypatch.setattr(instagram_service.requests, "Session", lambda: session)
+    worker = KKInstagramWorker(settings())
+    instagram_url = InstagramUrl(
+        canonical="https://www.instagram.com/reel/Code12345/",
+        shortcode="Code12345",
+        publication_type="reel",
+    )
+
+    post = worker.download(instagram_url, tmp_path, threading.Event())
+
+    assert len(post.media) == 1
+    assert post.media[0].kind is MediaKind.VIDEO
+    assert post.media[0].path.read_bytes() == b"video"
+    assert post.caption == instagram_service.texts.KKINSTAGRAM_CAPTION
+    assert session.closed
+    assert [request[0] for request in session.requests] == [
+        "https://www.kkinstagram.com/reel/Code12345/",
+        "https://cdninstagram.com/video.mp4",
+        "https://cdninstagram.com/video.mp4",
+    ]
+
+
 def test_kkinstagram_resolver_rejects_foreign_redirect_before_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -167,7 +214,7 @@ def test_kkinstagram_resolver_rejects_foreign_redirect_before_request(
             url="https://www.kkinstagram.com/reel/Code12345/",
         )
     )
-    worker = InstaloaderWorker(settings())
+    worker = KKInstagramWorker(settings())
     instagram_url = InstagramUrl(
         canonical="https://www.instagram.com/reel/Code12345/",
         shortcode="Code12345",
@@ -234,7 +281,7 @@ def test_redirect_to_foreign_domain_is_rejected(
         location="https://evil.example/media.jpg",
     )
     session = FakeSession(response)
-    worker = InstaloaderWorker(settings())
+    worker = KKInstagramWorker(settings())
 
     with pytest.raises(UnsupportedMedia):
         worker._download_source(

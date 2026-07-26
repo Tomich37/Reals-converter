@@ -23,7 +23,7 @@ class InstagramUrl:
 
 @dataclass(frozen=True, slots=True)
 class RemoteMedia:
-    """Медиафайл, адрес которого получен непосредственно от Instagram."""
+    """Проверенный прямой адрес медиафайла Instagram CDN."""
 
     url: str
     kind: MediaKind

@@ -56,27 +56,11 @@ def _float_value(
     return value
 
 
-def _boolean_value(
-    values: Mapping[str, object],
-    name: str,
-    default: bool,
-) -> bool:
-    """Читает логическую настройку в привычном для .env формате."""
-
-    raw_value = _string_value(values, name, str(default)).lower()
-    if raw_value in {"1", "true", "yes", "on"}:
-        return True
-    if raw_value in {"0", "false", "no", "off"}:
-        return False
-    raise ConfigError(f"{name} должен быть true или false.")
-
-
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Проверенные настройки приложения."""
 
     bot_token: str
-    max_media_items: int
     max_photo_bytes: int
     max_video_bytes: int
     max_total_bytes: int
@@ -87,7 +71,6 @@ class Settings:
     max_pending_requests: int
     max_requests_per_user_minute: int
     max_requests_per_minute: int
-    kkinstagram_fallback_enabled: bool
     temp_root: Path | None
 
     @classmethod
@@ -105,13 +88,6 @@ class Settings:
 
         return cls(
             bot_token=bot_token,
-            max_media_items=_integer_value(
-                values,
-                "MAX_MEDIA_ITEMS",
-                10,
-                minimum=1,
-                maximum=10,
-            ),
             max_photo_bytes=_integer_value(
                 values,
                 "MAX_PHOTO_BYTES",
@@ -181,11 +157,6 @@ class Settings:
                 20,
                 minimum=1,
                 maximum=600,
-            ),
-            kkinstagram_fallback_enabled=_boolean_value(
-                values,
-                "KKINSTAGRAM_FALLBACK_ENABLED",
-                True,
             ),
             temp_root=temp_root,
         )

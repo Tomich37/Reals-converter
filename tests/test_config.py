@@ -14,12 +14,10 @@ def test_settings_uses_defaults() -> None:
     settings = Settings.from_mapping(valid_values())
 
     assert settings.bot_token == "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_123456"
-    assert settings.max_media_items == 10
     assert settings.max_video_bytes == 49_000_000
     assert settings.max_concurrent_requests == 2
     assert settings.telegram_request_timeout_seconds == 300
     assert settings.max_requests_per_user_minute == 3
-    assert settings.kkinstagram_fallback_enabled is True
 
 
 def test_empty_token_is_rejected() -> None:
@@ -33,30 +31,9 @@ def test_invalid_token_format_is_rejected() -> None:
 
 
 def test_invalid_integer_has_clear_error() -> None:
-    values = {**valid_values(), "MAX_MEDIA_ITEMS": "много"}
+    values = {**valid_values(), "MAX_VIDEO_BYTES": "много"}
 
-    with pytest.raises(ConfigError, match="MAX_MEDIA_ITEMS"):
-        Settings.from_mapping(values)
-
-
-@pytest.mark.parametrize("value", ["false", "0", "no", "off"])
-def test_kkinstagram_fallback_can_be_disabled(value: str) -> None:
-    values = {**valid_values(), "KKINSTAGRAM_FALLBACK_ENABLED": value}
-
-    assert Settings.from_mapping(values).kkinstagram_fallback_enabled is False
-
-
-def test_invalid_boolean_has_clear_error() -> None:
-    values = {**valid_values(), "KKINSTAGRAM_FALLBACK_ENABLED": "иногда"}
-
-    with pytest.raises(ConfigError, match="KKINSTAGRAM_FALLBACK_ENABLED"):
-        Settings.from_mapping(values)
-
-
-def test_telegram_album_limit_cannot_be_exceeded() -> None:
-    values = {**valid_values(), "MAX_MEDIA_ITEMS": "11"}
-
-    with pytest.raises(ConfigError, match="MAX_MEDIA_ITEMS"):
+    with pytest.raises(ConfigError, match="MAX_VIDEO_BYTES"):
         Settings.from_mapping(values)
 
 
