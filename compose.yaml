@@ -1,0 +1,10 @@
+services:
+  bot:
+    build:
+      context: .
+    env_file:
+      - .env
+    init: true
+    restart: unless-stopped
+    tmpfs:
+      - /tmp:size=512m,mode=1777
