@@ -97,3 +97,31 @@ KKInstagram/KKClip — сторонний сервис, не связанный 
 Полезные первичные источники:
 
 - [Telegram Bot API: отправка файлов](https://core.telegram.org/bots/api#sending-files).
+
+## Запуск в Docker
+
+Установите Docker, скопируйте пример настроек и укажите токен бота:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Соберите образ и запустите бота:
+
+```powershell
+docker compose up -d --build
+```
+
+Посмотреть журнал работы:
+
+```powershell
+docker compose logs -f bot
+```
+
+Остановить и удалить контейнер:
+
+```powershell
+docker compose down
+```
+
+Файл `.env` используется только при запуске контейнера и не добавляется в образ.
