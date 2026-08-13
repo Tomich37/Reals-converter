@@ -67,6 +67,9 @@ class Settings:
     download_timeout_seconds: float
     media_request_timeout_seconds: float
     telegram_request_timeout_seconds: float
+    video_compression_threshold_bytes: int
+    video_compression_crf: int
+    video_compression_max_width: int
     max_concurrent_requests: int
     max_pending_requests: int
     max_requests_per_user_minute: int
@@ -129,6 +132,27 @@ class Settings:
                 300,
                 minimum=60,
                 maximum=1_800,
+            ),
+            video_compression_threshold_bytes=_integer_value(
+                values,
+                "VIDEO_COMPRESSION_THRESHOLD_BYTES",
+                8_000_000,
+                minimum=1_000_000,
+                maximum=50_000_000,
+            ),
+            video_compression_crf=_integer_value(
+                values,
+                "VIDEO_COMPRESSION_CRF",
+                28,
+                minimum=18,
+                maximum=35,
+            ),
+            video_compression_max_width=_integer_value(
+                values,
+                "VIDEO_COMPRESSION_MAX_WIDTH",
+                1_280,
+                minimum=480,
+                maximum=1_920,
             ),
             max_concurrent_requests=_integer_value(
                 values,

@@ -15,6 +15,7 @@ from app.handlers import create_router
 from app.services.coordinator import RequestCoordinator
 from app.services.instagram import InstagramDownloader
 from app.services.media_sender import MediaSender
+from app.services.video_compressor import VideoCompressor
 
 
 async def run_bot(settings: Settings) -> None:
@@ -31,7 +32,13 @@ async def run_bot(settings: Settings) -> None:
         max_requests_per_minute=settings.max_requests_per_minute,
     )
     downloader = InstagramDownloader(settings)
-    sender = MediaSender()
+    sender = MediaSender(
+        VideoCompressor(
+            threshold_bytes=settings.video_compression_threshold_bytes,
+            crf=settings.video_compression_crf,
+            max_width=settings.video_compression_max_width,
+        )
+    )
     dispatcher.include_router(create_router(downloader, sender, coordinator))
 
     await bot.set_my_commands(

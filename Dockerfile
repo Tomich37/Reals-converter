@@ -6,6 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ffmpeg уменьшает большие видео перед загрузкой в Telegram.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Сначала копируем метаданные и код отдельно, чтобы Docker мог кешировать установку.
 COPY pyproject.toml README.md ./
 COPY app ./app

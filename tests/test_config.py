@@ -17,6 +17,9 @@ def test_settings_uses_defaults() -> None:
     assert settings.max_video_bytes == 49_000_000
     assert settings.max_concurrent_requests == 2
     assert settings.telegram_request_timeout_seconds == 300
+    assert settings.video_compression_threshold_bytes == 8_000_000
+    assert settings.video_compression_crf == 28
+    assert settings.video_compression_max_width == 1_280
     assert settings.max_requests_per_user_minute == 3
 
 
