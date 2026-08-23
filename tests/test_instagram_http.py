@@ -108,6 +108,21 @@ def test_private_dns_address_is_rejected(monkeypatch: pytest.MonkeyPatch) -> Non
         instagram_service._validate_remote_url("https://cdninstagram.com/media")
 
 
+def test_proxy_fake_ip_address_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.241", 443))
+        ],
+    )
+
+    assert (
+        instagram_service._validate_remote_url("https://scontent.cdninstagram.com/video.mp4")
+        == "https://scontent.cdninstagram.com/video.mp4"
+    )
+
+
 def test_similar_but_foreign_domain_is_rejected() -> None:
     with pytest.raises(UnsupportedMedia):
         instagram_service._validate_remote_url("https://cdninstagram.com.evil.example/media")

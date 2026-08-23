@@ -50,6 +50,10 @@ _PHOTO_CONTENT_TYPES = {
 _VIDEO_CONTENT_TYPES = {
     "video/mp4": ".mp4",
 }
+# Clash, sing-box и другие TUN-прокси используют этот служебный пул для fake-IP DNS.
+# Домены до этой проверки уже ограничены Instagram и KKInstagram, поэтому разрешение
+# пула не открывает загрузчику произвольные адреса локальной сети.
+_PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
 _MAX_NETWORK_STEPS = 4
 _PROCESS_POLL_INTERVAL = 0.05
@@ -101,7 +105,7 @@ def _ensure_public_address(host: str) -> None:
             parsed_ip = ipaddress.ip_address(raw_ip)
         except ValueError as error:
             raise UnsupportedMedia from error
-        if not parsed_ip.is_global:
+        if not parsed_ip.is_global and parsed_ip not in _PROXY_FAKE_IP_NETWORK:
             raise UnsupportedMedia
 
 
