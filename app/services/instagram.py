@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import mimetypes
 import multiprocessing
 import socket
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -43,6 +45,7 @@ _ALLOWED_KKINSTAGRAM_HOSTS = {
 }
 _KKINSTAGRAM_BASE_URL = "https://www.kkinstagram.com"
 _KKINSTAGRAM_USER_AGENT = "TelegramBot (like TwitterBot)"
+logger = logging.getLogger(__name__)
 _PHOTO_CONTENT_TYPES = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -392,13 +395,13 @@ def _worker_process_entry(
     try:
         post = worker.download(instagram_url, directory, cancel_event)
     except _WorkerCancelled:
-        connection.send(("error", DownloadFailed.__name__, None))
+        connection.send(("error", DownloadFailed.__name__, "Загрузка отменена.", None))
     except AppError as error:
-        connection.send(("error", type(error).__name__, None))
+        connection.send(("error", type(error).__name__, traceback.format_exc(), None))
     except BaseException:
-        connection.send(("error", DownloadFailed.__name__, None))
+        connection.send(("error", DownloadFailed.__name__, traceback.format_exc(), None))
     else:
-        connection.send(("ok", "", post))
+        connection.send(("ok", "", "", post))
     finally:
         connection.close()
 
@@ -511,12 +514,13 @@ class InstagramDownloader:
         try:
             if not connection.poll(0.5):
                 raise DownloadFailed
-            status, error_name, post = connection.recv()
+            status, error_name, error_details, post = connection.recv()
         except (EOFError, OSError) as error:
             raise DownloadFailed from error
 
         if status == "ok" and isinstance(post, DownloadedPost):
             return post
 
+        logger.error("Ошибка в процессе загрузки Instagram (%s):\n%s", error_name, error_details)
         error_type = _WORKER_ERROR_TYPES.get(str(error_name), DownloadFailed)
         raise error_type
