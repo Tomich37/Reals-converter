@@ -41,18 +41,18 @@ async def run_bot(settings: Settings) -> None:
     )
     dispatcher.include_router(create_router(downloader, sender, coordinator))
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start", description="Как пользоваться ботом"),
-            BotCommand(command="help", description="Поддерживаемые ссылки"),
-            BotCommand(command="privacy", description="Обработка данных"),
-            BotCommand(command="terms", description="Условия использования"),
-            BotCommand(command="report", description="Сообщить о проблеме"),
-        ]
-    )
-    await bot.delete_webhook(drop_pending_updates=False)
-
     try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Как пользоваться ботом"),
+                BotCommand(command="help", description="Поддерживаемые ссылки"),
+                BotCommand(command="privacy", description="Обработка данных"),
+                BotCommand(command="terms", description="Условия использования"),
+                BotCommand(command="report", description="Сообщить о проблеме"),
+            ]
+        )
+        await bot.delete_webhook(drop_pending_updates=False)
+
         logging.getLogger(__name__).info("Бот запущен и ожидает ссылки.")
         await dispatcher.start_polling(
             bot,

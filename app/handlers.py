@@ -47,6 +47,33 @@ def _text_for_error(error: AppError) -> str:
     return texts.UNEXPECTED_ERROR
 
 
+_ERROR_NAMES: tuple[tuple[type[AppError], str], ...] = (
+    (DownloadTimedOut, "истекло время ожидания загрузки"),
+    (FileTooLarge, "файл превышает допустимый размер"),
+    (TotalSizeExceeded, "превышен общий допустимый размер публикации"),
+    (UnsupportedMedia, "неподдерживаемый тип медиа"),
+    (DownloadFailed, "не удалось загрузить медиа"),
+)
+
+
+
+def _error_details(error: Exception) -> str:
+    """Сводит тип ошибки и текст её ближайшей причины"""
+
+    details = [f"{type(error).__name__}: {error}".rstrip(": ")]
+    cause = error.__cause__ or error.__context__
+    if cause is not None and cause is not error:
+        details.append(f"{type(cause).__name__}: {cause}".rstrip(": "))
+    return " <- ".join(details)
+
+
+def _name_for_error(error: AppError) -> str:
+    for error_type, name in _ERROR_NAMES:
+        if isinstance(error, error_type):
+            return name
+    return "".join(map(chr, (0x043e,0x0448,0x0438,0x0431,0x043a,0x0430,0x0020,0x043f,0x0440,0x0438,0x043b,0x043e,0x0436,0x0435,0x043d,0x0438,0x044f)))
+
+
 async def _replace_status(status: Message, text: str) -> None:
     """Показывает итог в служебном сообщении и имеет безопасный запасной путь."""
 
@@ -108,10 +135,11 @@ def create_router(
                     async with downloader.download(instagram_url) as post:
                         await sender.send(message, post)
                 except AppError as error:
-                    logger.info(
-                        "Запрос %s завершён ожидаемой ошибкой %s.",
+                    logger.exception(
+                        "Запрос %s не выполнен: %s. Причина: %s.",
                         request_id,
-                        type(error).__name__,
+                        _name_for_error(error),
+                        _error_details(error),
                     )
                     await _replace_status(status, _text_for_error(error))
                 except TelegramAPIError as error:
