@@ -13,10 +13,10 @@ RUN apt-get update \
 
 # Сначала копируем метаданные и код отдельно, чтобы Docker мог кешировать установку.
 COPY pyproject.toml README.md ./
-COPY app ./app
-
 RUN python -m pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 bot
+
+COPY app ./app
 
 # Бот не требует прав root; временные файлы сохраняются в системный /tmp.
 USER bot
